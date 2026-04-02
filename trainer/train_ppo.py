@@ -20,7 +20,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
-from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel
+from trainer.trainer_utils import add_residual_args, build_lm_config, build_optimizer, ensure_supported_rollout_engine, Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel, get_weight_path, resolve_weight_path
 from trainer.rollout_engine import create_rollout_engine
 
 warnings.filterwarnings('ignore')
@@ -42,7 +42,7 @@ class CriticModel(MiniMindForCausalLM):
     def forward(self, input_ids=None, attention_mask=None, **kwargs):
         # 使用基础模型获取隐藏状态
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, **kwargs)
-        hidden_states = self.model.norm(outputs[0])
+        hidden_states = outputs[0]
         # 使用value_head获取价值估计
         values = self.value_head(hidden_states).squeeze(-1)
         return values
@@ -280,8 +280,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():
             actor_model.eval()
-            moe_suffix = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+            ckp = get_weight_path(args.save_dir, args.save_weight, lm_config)
             raw_actor = actor_model.module if isinstance(actor_model, DistributedDataParallel) else actor_model
             raw_actor = getattr(raw_actor, '_orig_mod', raw_actor)
             actor_state = raw_actor.state_dict()
@@ -343,6 +342,7 @@ if __name__ == "__main__":
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8997", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="../model", help="SGLang tokenizer路径")
     parser.add_argument("--sglang_shared_path", type=str, default="./sglang_ckpt_ppo", help="SGLang共享存储路径")
+    add_residual_args(parser)
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -352,9 +352,11 @@ if __name__ == "__main__":
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
-    lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe))
+    lm_config = build_lm_config(args, max_position_embeddings=args.max_seq_len + args.max_gen_len)
     ckp_data = lm_checkpoint(lm_config, weight=args.save_weight, save_dir='../checkpoints') if args.from_resume==1 else None
     
+    ensure_supported_rollout_engine(lm_config, args.rollout_engine)
+
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
@@ -375,8 +377,7 @@ if __name__ == "__main__":
     actor_model, tokenizer = init_model(lm_config, base_weight, device=args.device)
     ref_model, _ = init_model(lm_config, base_weight, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
-    moe_suffix = '_moe' if lm_config.use_moe else ''
-    ckp = f'{args.save_dir}/{base_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+    ckp = resolve_weight_path(args.save_dir, base_weight, lm_config)
     state_dict = torch.load(ckp, map_location=args.device)
     critic_model = CriticModel(lm_config)
     critic_model.load_state_dict(state_dict, strict=False)
@@ -395,8 +396,8 @@ if __name__ == "__main__":
     )
     train_ds = RLAIFDataset(args.data_path, tokenizer, max_length=(args.max_seq_len + args.max_gen_len), thinking_ratio=args.thinking_ratio)
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
-    actor_optimizer = optim.AdamW(actor_model.parameters(), lr=args.learning_rate)
-    critic_optimizer = optim.AdamW(critic_model.parameters(), lr=args.critic_learning_rate)
+    actor_optimizer = build_optimizer(actor_model, args.learning_rate, residual_lr_scale=args.attnres_lr_scale)
+    critic_optimizer = build_optimizer(critic_model, args.critic_learning_rate, residual_lr_scale=args.attnres_lr_scale)
     loader_for_count = DataLoader(train_ds, batch_size=args.batch_size, sampler=train_sampler)
     iters = len(loader_for_count)
     mb_factor = max(1, math.ceil(args.batch_size / args.mini_batch_size))

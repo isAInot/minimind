@@ -10,6 +10,7 @@ import warnings
 from transformers import AutoTokenizer, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import apply_lora, merge_lora
+from trainer.trainer_utils import get_weight_path
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -38,6 +39,8 @@ def convert_torch2transformers_minimind(torch_path, transformers_path, dtype=tor
 
 # QwenForCausalLM/LlamaForCausalLM结构兼容生态
 def convert_torch2transformers(torch_path, transformers_path, dtype=torch.float16):
+    if getattr(lm_config, "residual_mode", "standard") != "standard":
+        raise ValueError("Qwen兼容导出暂不支持 Attention Residuals，请使用 convert_torch2transformers_minimind 导出原生MiniMind结构。")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     state_dict = torch.load(torch_path, map_location=device)
     common_config = {
@@ -126,16 +129,16 @@ def convert_json_to_jinja(json_file_path, output_path):
 
 
 if __name__ == '__main__':
-    lm_config = MiniMindConfig(hidden_size=768, num_hidden_layers=8, max_seq_len=8192, use_moe=False)
+    lm_config = MiniMindConfig(hidden_size=768, num_hidden_layers=8, max_position_embeddings=8192, use_moe=False)
     # convert torch to transformers
-    torch_path = f"../out/full_sft_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}.pth"
+    torch_path = get_weight_path("../out", "full_sft", lm_config)
     transformers_path = '../minimind-3'
     convert_torch2transformers(torch_path, transformers_path)
 
     # # merge lora
-    # base_torch_path = f"../out/full_sft_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}.pth"
+    # base_torch_path = get_weight_path("../out", "full_sft", lm_config)
     # lora_path = f"../out/lora_identity_{lm_config.hidden_size}.pth"
-    # merged_torch_path = f"../out/merge_identity_{lm_config.hidden_size}{'_moe' if lm_config.use_moe else ''}.pth"
+    # merged_torch_path = get_weight_path("../out", "merge_identity", lm_config)
     # convert_merge_base_lora(base_torch_path, lora_path, merged_torch_path)
 
     # convert_transformers2torch(transformers_path, torch_path)

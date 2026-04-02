@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from model.model_lora import apply_lora, load_lora
+from trainer.trainer_utils import add_residual_args, build_lm_config, resolve_weight_path
 
 warnings.filterwarnings('ignore')
 
@@ -28,15 +29,9 @@ app = FastAPI()
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'../{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
-        model = MiniMindForCausalLM(MiniMindConfig(
-            hidden_size=args.hidden_size,
-            num_hidden_layers=args.num_hidden_layers,
-            max_seq_len=args.max_seq_len,
-            use_moe=bool(args.use_moe),
-            inference_rope_scaling=args.inference_rope_scaling
-        ))
+        lm_config = build_lm_config(args, max_position_embeddings=args.max_seq_len)
+        ckp = resolve_weight_path(f'../{args.save_dir}', args.weight, lm_config)
+        model = MiniMindForCausalLM(lm_config)
         model.load_state_dict(torch.load(ckp, map_location=device), strict=True)
         if args.lora_weight != 'None':
             apply_lora(model)
@@ -239,6 +234,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--inference_rope_scaling', default=False, action='store_true', help="启用RoPE位置编码外推（4倍，仅解决位置编码问题）")
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu', type=str, help="运行设备")
+    add_residual_args(parser)
     args = parser.parse_args()
     device = args.device
     model, tokenizer = init_model(args)

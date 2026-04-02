@@ -207,6 +207,8 @@ def create_rollout_engine(
     if engine_type == "torch":
         return TorchRolloutEngine(policy_model, tokenizer, device, autocast_ctx)
     elif engine_type == "sglang":
+        if policy_model is not None and getattr(getattr(policy_model, "config", None), "residual_mode", "standard") != "standard":
+            raise ValueError("SGLang rollout 暂不支持 Attention Residuals，请使用 torch rollout。")
         return SGLangRolloutEngine(sglang_base_url, sglang_model_path, sglang_shared_path)
     else:
         raise ValueError(f"不支持的引擎类型: {engine_type}")

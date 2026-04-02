@@ -12,7 +12,7 @@ from datetime import datetime
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 from openai import OpenAI
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
-from trainer.trainer_utils import setup_seed, get_model_params
+from trainer.trainer_utils import add_residual_args, build_lm_config, resolve_weight_path, setup_seed, get_model_params
 warnings.filterwarnings('ignore')
 
 TOOLS = [
@@ -57,9 +57,9 @@ TEST_CASES = [
 def init_model(args):
     tokenizer = AutoTokenizer.from_pretrained(args.load_from)
     if 'model' in args.load_from:
-        model = MiniMindForCausalLM(MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=bool(args.use_moe)))
-        moe_suffix = '_moe' if args.use_moe else ''
-        ckp = f'./{args.save_dir}/{args.weight}_{args.hidden_size}{moe_suffix}.pth'
+        lm_config = build_lm_config(args)
+        model = MiniMindForCausalLM(lm_config)
+        ckp = resolve_weight_path(args.save_dir, args.weight, lm_config)
         model.load_state_dict(torch.load(ckp, map_location=args.device), strict=True)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.load_from, trust_remote_code=True)
@@ -217,6 +217,7 @@ def main():
     parser.add_argument('--api_key', default='sk-123', type=str, help="OpenAI兼容接口的api_key")
     parser.add_argument('--api_model', default='jingyaogong/minimind-3:latest', type=str, help="API请求时使用的模型名称")
     parser.add_argument('--stream', default=1, type=int, help="API模式下是否流式输出（0=否，1=是）")
+    add_residual_args(parser)
     args = parser.parse_args()
 
     model = tokenizer = client = None
